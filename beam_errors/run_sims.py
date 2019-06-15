@@ -2,7 +2,7 @@
 
 """Script to run LOW station beam error simulations."""
 
-from __future__ import print_function
+from __future__ import print_function, division
 import logging
 import os
 import shutil
@@ -21,76 +21,87 @@ import oskar
 LOG = logging.getLogger()
 
 
-def make_vis_data(settings_dict, single_source_offset=-1):
+def make_vis_data(settings, sky, tel):
     """Run simulation using supplied settings."""
-    settings = oskar.SettingsTree('oskar_sim_interferometer')
-    settings.from_dict(settings_dict)
-    out = settings['interferometer/ms_filename']
-    if os.path.exists(out):
-        LOG.info("Skipping simulation, as '%s' already exists", out)
+    out_ms = settings['interferometer/ms_filename']
+    out_vis = settings['interferometer/oskar_vis_filename']
+    out_files = []
+    if out_ms and not os.path.exists(out_ms):
+        out_files.append(out_ms)
+    if out_vis and not os.path.exists(out_vis):
+        out_files.append(out_vis)
+    if not out_files:
+        LOG.info("Skipping simulation, as output data already exist.")
         return
 
-    # Generate single-source sky model if in single-source mode.
-    temp_sky = None
-    if single_source_offset >= 0:
-        ra = float(settings['observation/phase_centre_ra_deg'])
-        dec = float(settings['observation/phase_centre_dec_deg'])
-        (_, temp_sky) = tempfile.mkstemp(suffix='.osm')
-        with open(temp_sky, 'w') as fhan:
-            fhan.write("%.5f %.5f 1\n" % (ra, dec - single_source_offset))
+    LOG.info("Simulating %s", ', '.join(out_files))
+    if sky.num_sources == 1:
         settings['simulator/use_gpus'] = 'false'
         settings['simulator/max_sources_per_chunk'] = '2'
-        settings['sky/oskar_sky_model/file'] = temp_sky
-
-    LOG.info("Simulating '%s'", out)
     #print(json.dumps(settings.to_dict(), indent=4))
     sim = oskar.Interferometer(settings=settings)
+    sim.set_sky_model(sky)
+    sim.set_telescope_model(tel)
     sim.run()
-    if temp_sky:
-        os.remove(temp_sky)
 
 
-def make_diff_image_stats(ms_name1, ms_name2, image_root=None):
-    """Make an image of the difference between two Measurement Sets.
+def make_diff_image_stats(filename1, filename2, out_image_root=None):
+    """Make an image of the difference between two visibility data sets.
 
-    This function assumes that both Measurement Sets are identical, apart
-    from the contents of the visibility DATA column.
-    (It will fail horribly otherwise!)
+    This function assumes that the observation parameters for both data sets
+    are identical. (It will fail horribly otherwise!)
     """
-    # Open both Measurement Sets.
-    ms1 = oskar.MeasurementSet.open(ms_name1)
-    ms2 = oskar.MeasurementSet.open(ms_name2)
-    num_rows = ms1.num_rows
-    num_channels = ms1.num_channels
-    num_stations = ms1.num_stations
-    if ms2.num_rows != num_rows or \
-            ms2.num_channels != num_channels or \
-            ms2.num_stations != num_stations:
-        LOG.error("'%s' and '%s' do not have the same dimensions! Aborting.",
-                  ms_name1, ms_name2)
-        return {}
-    num_baselines = num_stations * (num_stations - 1) // 2
-    num_chunks = (num_rows + num_baselines - 1) // num_baselines
-
     # Set up an imager.
     imager = oskar.Imager(precision='double')
     imager.set(fov_deg=5.0, image_size=5000, fft_on_gpu=True)
-    imager.set_vis_frequency(ms1.freq_start_hz, ms1.freq_inc_hz, num_channels)
-    if image_root is not None:
-        imager.output_root = image_root
+    if out_image_root is not None:
+        imager.output_root = out_image_root
 
-    LOG.info("Imaging differences between '%s' and '%s'", ms_name1, ms_name2)
-    for i_chunk in range(num_chunks):
-        start_row = i_chunk * num_baselines
-        (uu, vv, ww) = ms1.read_coords(start_row, num_baselines)
-        vis1 = ms1.read_vis(start_row, 0, num_channels, num_baselines)
-        vis2 = ms2.read_vis(start_row, 0, num_channels, num_baselines)
-        vis_out = vis1 - vis2
-        imager.update(uu, vv, ww, amps=vis_out,
-                      start_channel=0, end_channel=num_channels-1)
+    LOG.info("Imaging differences between '%s' and '%s'", filename1, filename2)
+    if filename1.lower().endswith('.ms') and filename2.lower().endswith('.ms'):
+        handle1 = oskar.MeasurementSet.open(filename1)
+        handle2 = oskar.MeasurementSet.open(filename2)
+        num_rows = handle1.num_rows
+        num_channels = handle1.num_channels
+        num_stations = handle1.num_stations
+        if handle2.num_rows != num_rows or \
+                handle2.num_channels != num_channels or \
+                handle2.num_stations != num_stations:
+            raise RuntimeError("'%s' and '%s' have different dimensions!" %
+                               (filename1, filename2))
+        num_baselines = num_stations * (num_stations - 1) // 2
+        num_chunks = (num_rows + num_baselines - 1) // num_baselines
+        imager.set_vis_frequency(handle1.freq_start_hz,
+                                 handle1.freq_inc_hz, num_channels)
+        for i_chunk in range(num_chunks):
+            start_row = i_chunk * num_baselines
+            (uu, vv, ww) = handle1.read_coords(start_row, num_baselines)
+            vis1 = handle1.read_vis(start_row, 0, num_channels, num_baselines)
+            vis2 = handle2.read_vis(start_row, 0, num_channels, num_baselines)
+            vis_out = vis1 - vis2
+            imager.update(uu, vv, ww, amps=vis_out,
+                          start_channel=0, end_channel=num_channels-1)
+        del handle1, handle2
+    else:
+        (hdr1, handle1) = oskar.VisHeader.read(filename1)
+        (hdr2, handle2) = oskar.VisHeader.read(filename2)
+        block1 = oskar.VisBlock.create_from_header(hdr1)
+        block2 = oskar.VisBlock.create_from_header(hdr2)
+        if hdr1.num_blocks != hdr2.num_blocks or \
+                hdr1.num_stations != hdr2.num_stations or \
+                hdr1.max_times_per_block != hdr2.max_times_per_block or \
+                hdr1.max_channels_per_block != hdr2.max_channels_per_block:
+            raise RuntimeError("'%s' and '%s' have different dimensions!" %
+                               (filename1, filename2))
+        for i_block in range(hdr1.num_blocks):
+            block1.read(hdr1, handle1, i_block)
+            block2.read(hdr2, handle2, i_block)
+            block1.cross_correlations()[...] -= block2.cross_correlations()
+            imager.update_from_block(hdr1, block1)
+        del handle1, handle2, hdr1, hdr2, block1, block2
+
+    # Finalise image and return it to Python.
     output = imager.finalise(return_images=1)
-    del ms1  # Delete the objects (not the Measurement Sets).
-    del ms2
     image = output['images'][0]
 
     LOG.info("Generating image statistics")
@@ -183,30 +194,40 @@ def make_plot(prefix, field_name, metric_key, results,
     plt.close('all')
 
 
-def run_single(prefix_field, settings, single_source_offset,
-               gain_std_dB, phase_std_deg, out0_ms, results):
+def run_single(prefix_field, settings, sky, tel,
+               gain_std_dB, phase_std_deg, out0_name, results):
     """Run a single simulation and generate image statistics for it."""
     out = '%s_%.3f_dB_%.2f_deg' % (prefix_field, gain_std_dB, phase_std_deg)
     if out in results:
         LOG.info("Using cached results for '%s'", out)
         return
-    out_ms = out + '.ms'
+    out_name = out + '.vis'
     gain_std = numpy.power(10.0, gain_std_dB / 10.0) - 1.0
-    key_prefix = 'telescope/aperture_array/array_pattern/element/'
-    settings[key_prefix + 'gain_error_fixed'] = str(gain_std)
-    settings[key_prefix + 'phase_error_fixed_deg'] = str(phase_std_deg)
-    settings['interferometer/ms_filename'] = out_ms
-    make_vis_data(settings, single_source_offset)
+    tel.override_element_gains(1.0, gain_std)
+    tel.override_element_phases(phase_std_deg)
+    settings['interferometer/oskar_vis_filename'] = out_name
+    make_vis_data(settings, sky, tel)
     out_image_root = None
     if out == 'GLEAM_100_MHz_EoR0_0.170_dB_1.20_deg':
         out_image_root = out
-    results[out] = make_diff_image_stats(out0_ms, out_ms, out_image_root)
-    shutil.rmtree(out_ms)  # Delete output MS to save space.
+    results[out] = make_diff_image_stats(out0_name, out_name, out_image_root)
+
+    # Delete output visibility data to save space.
+    if os.path.isdir(out_name):
+        shutil.rmtree(out_name)
+    else:
+        os.remove(out_name)
 
 
 def run_set(prefix, base_settings, fields, axis_gain, axis_phase, specials,
-            single_source_offset):
+            single_source_offset, plot_only):
     """Runs a set of simulations."""
+    if not plot_only:
+        # Load base telescope model.
+        settings = oskar.SettingsTree('oskar_sim_interferometer')
+        settings.from_dict(base_settings)
+        tel = oskar.Telescope(settings=settings)
+
     # Iterate over fields.
     for field_name, field in fields.items():
         # Load result set, if it exists.
@@ -217,25 +238,46 @@ def run_set(prefix, base_settings, fields, axis_gain, axis_phase, specials,
             with open(json_file, 'r') as input_file:
                 results = json.load(input_file)
 
-        # Simulate the 'perfect' case.
-        out0_ms = '%s_no_errors.ms' % prefix_field
-        settings = base_settings.copy()
-        settings.update(field)
-        settings['interferometer/ms_filename'] = out0_ms
-        make_vis_data(settings, single_source_offset)
+        if not plot_only:
+            # Update settings for field.
+            settings_dict = base_settings.copy()
+            settings_dict.update(field)
+            settings.from_dict(settings_dict)
+            ra_deg = float(settings['observation/phase_centre_ra_deg'])
+            dec_deg = float(settings['observation/phase_centre_dec_deg'])
+            tel.set_phase_centre(ra_deg, dec_deg)
 
-        # Simulate the error cases.
-        for gain_std_dB in axis_gain:
-            for phase_std_deg in axis_phase:
-                run_single(prefix_field, settings, single_source_offset,
-                           gain_std_dB, phase_std_deg, out0_ms, results)
+            # Load the sky model.
+            if single_source_offset >= 0:
+                (_, temp_sky) = tempfile.mkstemp(suffix='.osm')
+                with open(temp_sky, 'w') as fhan:
+                    fhan.write("%.5f %.5f 1\n" %
+                               (ra_deg, dec_deg - single_source_offset))
+                settings['sky/oskar_sky_model/file'] = temp_sky
+                sky = oskar.Sky(settings=settings)
+                os.remove(temp_sky)
+            else:
+                sky = oskar.Sky(settings=settings)
 
-        # Simulate the 'special' error cases.
-        for _, params in specials.items():
-            gain_std_dB = params['gain_std_dB']
-            phase_std_deg = params['phase_std_deg']
-            run_single(prefix_field, settings, single_source_offset,
-                       gain_std_dB, phase_std_deg, out0_ms, results)
+            # Simulate the 'perfect' case.
+            tel.override_element_gains(1.0, 0.0)
+            tel.override_element_phases(0.0)
+            out0_name = '%s_no_errors.vis' % prefix_field
+            settings['interferometer/oskar_vis_filename'] = out0_name
+            make_vis_data(settings, sky, tel)
+
+            # Simulate the error cases.
+            for gain_std_dB in axis_gain:
+                for phase_std_deg in axis_phase:
+                    run_single(prefix_field, settings, sky, tel,
+                               gain_std_dB, phase_std_deg, out0_name, results)
+
+            # Simulate the 'special' error cases.
+            for _, params in specials.items():
+                gain_std_dB = params['gain_std_dB']
+                phase_std_deg = params['phase_std_deg']
+                run_single(prefix_field, settings, sky, tel,
+                           gain_std_dB, phase_std_deg, out0_name, results)
 
         # Generate plot for the field.
         if single_source_offset >= 0:
@@ -264,6 +306,7 @@ def main():
     base_settings = {
         'simulator': {
             'double_precision': 'true',
+            'use_gpus': 'true',
             'max_sources_per_chunk': '20000'
         },
         'observation' : {
@@ -324,13 +367,15 @@ def main():
     }
 
     # Single source simulations.
+    plot_only = False
     single_source_offset = 2.25
     run_set('src1_100_MHz_%.2f_deg' % single_source_offset, base_settings,
-            fields, axis_gain, axis_phase, specials, single_source_offset)
+            fields, axis_gain, axis_phase, specials, single_source_offset,
+            plot_only)
 
     # GLEAM sky model simulations.
     run_set('GLEAM_100_MHz', base_settings,
-            fields, axis_gain, axis_phase, specials, -1)
+            fields, axis_gain, axis_phase, specials, -1, plot_only)
 
 
 if __name__ == '__main__':
