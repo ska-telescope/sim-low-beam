@@ -202,7 +202,7 @@ def run_single(prefix_field, settings, sky, tel,
         LOG.info("Using cached results for '%s'", out)
         return
     out_name = out + '.vis'
-    gain_std = numpy.power(10.0, gain_std_dB / 10.0) - 1.0
+    gain_std = numpy.power(10.0, gain_std_dB / 20.0) - 1.0
     tel.override_element_gains(1.0, gain_std)
     tel.override_element_phases(phase_std_deg)
     settings['interferometer/oskar_vis_filename'] = out_name
