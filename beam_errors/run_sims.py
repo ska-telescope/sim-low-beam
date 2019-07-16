@@ -180,9 +180,11 @@ def make_plot(prefix, field_name, metric_key, results,
         metric_name = 'Central RMS [Jy/beam]'
     elif metric_key == 'image_medianabs':
         metric_name = 'MEDIAN(ABS(image)) [Jy/beam]'
-    sky_model = 'GLEAM + A-team'
+    sky_model = 'GLEAM'
     if single_source_offset >= 0:
         sky_model = 'single source'
+    if 'A-team' in prefix:
+        sky_model = sky_model + ' + A-team'
     plt.title('%s for %s field (%s)' % (metric_name, field_name, sky_model))
     plt.xlabel('Element gain standard deviation [dB]')
     plt.ylabel('Element phase standard deviation [deg]')
@@ -206,14 +208,14 @@ def run_single(prefix_field, settings, sky, tel,
     settings['interferometer/oskar_vis_filename'] = out_name
     make_vis_data(settings, sky, tel)
     out_image_root = None
-    if out == 'GLEAM_100_MHz_EoR0_0.170_dB_1.20_deg':
+    if 'EoR0_0.170_dB_1.20_deg' in out:
         out_image_root = out
     use_w_projection = True
-    if sky.num_sources == 1:
+    if str(settings['interferometer/ignore_w_components']).lower() == 'true':
         use_w_projection = False
     results[out] = make_diff_image_stats(out0_name, out_name, use_w_projection,
                                          out_image_root)
-    #os.remove(out_name)  # Delete visibility data to save space.
+    os.remove(out_name)  # Delete visibility data to save space.
 
 
 def run_set(prefix, base_settings, fields, axis_gain, axis_phase, specials,
@@ -248,16 +250,17 @@ def run_set(prefix, base_settings, fields, axis_gain, axis_phase, specials,
             tel.set_phase_centre(ra_deg, dec_deg)
 
             # Load or create the sky model.
+            settings['interferometer/ignore_w_components'] = 'true'
             if single_source_offset >= 0:
                 sky = oskar.Sky.from_array(numpy.array((
                     [ra_deg, dec_deg - single_source_offset, 1])))
-                settings['interferometer/ignore_w_components'] = 'true'
             else:
                 sky = oskar.Sky(settings=settings)
-                num_sources0 = sky.num_sources
-                append_bright_sources(sky)
-                assert sky.num_sources - num_sources0 == 10
-                settings['interferometer/ignore_w_components'] = 'false'
+                if 'A-team' in prefix:
+                    num_sources0 = sky.num_sources
+                    append_bright_sources(sky)
+                    assert sky.num_sources - num_sources0 == 10
+                    settings['interferometer/ignore_w_components'] = 'false'
 
             # Simulate the 'perfect' case.
             tel.override_element_gains(1.0, 0.0)
@@ -370,7 +373,7 @@ def main():
             plot_only)
 
     # GLEAM + A-team sky model simulations.
-    run_set('GLEAM_100_MHz', base_settings,
+    run_set('GLEAM_A-team_100_MHz', base_settings,
             fields, axis_gain, axis_phase, specials, -1, plot_only)
 
 
