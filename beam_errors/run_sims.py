@@ -284,6 +284,8 @@ def run_set(prefix, base_settings, fields, axis_gain, axis_phase, specials,
             make_plot(prefix, field_name, 'image_centre_rms', results,
                       axis_gain, axis_phase, specials, single_source_offset)
         else:
+            make_plot(prefix, field_name, 'image_centre_rms', results,
+                      axis_gain, axis_phase, specials, single_source_offset)
             make_plot(prefix, field_name, 'image_medianabs', results,
                       axis_gain, axis_phase, specials, single_source_offset)
 
